@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ticktick_mcp.client import TickTickClient
 from ticktick_mcp.exceptions import (
     TickTickError,
     TickTickAuthenticationError,
@@ -26,7 +27,6 @@ from ticktick_mcp.exceptions import (
 
 if TYPE_CHECKING:
     from tests.conftest import MockUnifiedAPI
-    from ticktick_mcp.client import TickTickClient
 
 
 pytestmark = [pytest.mark.errors, pytest.mark.unit]
@@ -126,8 +126,9 @@ class TestNotFoundErrors:
 # =============================================================================
 
 
+@pytest.mark.mock_only
 class TestAPIErrors:
-    """Tests for API error handling."""
+    """Tests for API error handling (uses mock error injection)."""
 
     async def test_api_error_on_task_create(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test API error handling during task creation."""
@@ -163,8 +164,9 @@ class TestAPIErrors:
 # =============================================================================
 
 
+@pytest.mark.mock_only
 class TestAuthenticationErrors:
-    """Tests for authentication error handling."""
+    """Tests for authentication error handling (uses mock error injection)."""
 
     async def test_authentication_error_on_initialize(
         self,
@@ -206,8 +208,9 @@ class TestAuthenticationErrors:
 # =============================================================================
 
 
+@pytest.mark.mock_only
 class TestErrorRecovery:
-    """Tests for error recovery scenarios."""
+    """Tests for error recovery scenarios (uses mock error injection)."""
 
     async def test_operation_succeeds_after_error_cleared(
         self,
@@ -277,26 +280,45 @@ class TestErrorRecovery:
 class TestEdgeCaseErrors:
     """Tests for edge case error scenarios."""
 
-    async def test_error_on_delete_then_get(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting a deleted task raises not found."""
+    async def test_deleted_task_accessible_with_deleted_flag(
+        self, client: TickTickClient, mock_api: MockUnifiedAPI
+    ):
+        """Test that deleted tasks can still be retrieved with deleted=1.
+
+        TickTick uses soft delete - tasks go to trash and are still accessible.
+        The `deleted` field indicates the task is in trash.
+        """
         task = await client.create_task(title="Task")
         task_id = task.id
 
         await client.delete_task(task_id, task.project_id)
 
-        with pytest.raises(TickTickNotFoundError):
-            await client.get_task(task_id)
+        # Task should still be retrievable with deleted=1
+        retrieved = await client.get_task(task_id)
+        assert retrieved.id == task_id
+        assert retrieved.deleted == 1
 
-    async def test_error_on_complete_deleted_task(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test completing a deleted task raises error."""
+    async def test_operations_on_deleted_task_succeed(
+        self, client: TickTickClient, mock_api: MockUnifiedAPI
+    ):
+        """Test that operations on deleted tasks succeed.
+
+        TickTick allows operations on trashed tasks - they remain in trash
+        but can still be modified (e.g., completed).
+        """
         task = await client.create_task(title="Task")
         project_id = task.project_id
         task_id = task.id
 
         await client.delete_task(task_id, project_id)
 
-        with pytest.raises(TickTickNotFoundError):
-            await client.complete_task(task_id, project_id)
+        # Completing a deleted task should succeed (task is in trash AND completed)
+        await client.complete_task(task_id, project_id)
+
+        # Verify task is both completed and deleted
+        retrieved = await client.get_task(task_id)
+        assert retrieved.deleted == 1
+        assert retrieved.status == 2  # COMPLETED
 
     async def test_error_on_move_to_deleted_project(
         self,
@@ -358,6 +380,7 @@ class TestExceptionHierarchy:
         # NotFoundError is an APIError
         assert issubclass(TickTickNotFoundError, TickTickAPIError)
 
+    @pytest.mark.mock_only
     async def test_catch_base_exception(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that catching base TickTickError catches all."""
         mock_api.should_fail["create_task"] = TickTickAPIError("API Error")
@@ -365,6 +388,7 @@ class TestExceptionHierarchy:
         with pytest.raises(TickTickError):
             await client.create_task(title="Test")
 
+    @pytest.mark.mock_only
     async def test_specific_exception_not_caught_by_sibling(
         self,
         client: TickTickClient,

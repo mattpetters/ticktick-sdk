@@ -35,18 +35,15 @@ class TestFolderCreation:
 
         assert folder is not None
         assert folder.name == "Simple Folder"
-        assert folder.id in mock_api.folders
-        mock_api.assert_called("create_project_group")
 
     async def test_create_multiple_folders(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test creating multiple folders."""
         folders = []
         for i in range(5):
-            folder = await client.create_folder(name=f"Folder {i}")
+            folder = await client.create_folder(name=f"MultiFolder {i}")
             folders.append(folder)
 
         assert len(folders) == 5
-        assert len(mock_api.folders) == 5
 
         # All IDs should be unique
         ids = [f.id for f in folders]
@@ -77,16 +74,25 @@ class TestFolderRetrieval:
 
     async def test_get_all_folders(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test getting all folders."""
-        await client.create_folder(name="Folder 1")
-        await client.create_folder(name="Folder 2")
-        await client.create_folder(name="Folder 3")
+        folder1 = await client.create_folder(name="Folder 1")
+        folder2 = await client.create_folder(name="Folder 2")
+        folder3 = await client.create_folder(name="Folder 3")
 
         folders = await client.get_all_folders()
 
-        assert len(folders) == 3
+        # Verify created folders are in the list
+        folder_ids = [f.id for f in folders]
+        assert folder1.id in folder_ids
+        assert folder2.id in folder_ids
+        assert folder3.id in folder_ids
+        assert len(folders) >= 3
 
+    @pytest.mark.mock_only
     async def test_get_all_folders_empty(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting folders when none exist."""
+        """Test getting folders when none exist.
+
+        Mock-only because live accounts have existing data.
+        """
         folders = await client.get_all_folders()
 
         assert folders == []
@@ -107,21 +113,31 @@ class TestFolderDeletion:
 
         await client.delete_folder(folder_id)
 
-        assert folder_id not in mock_api.folders
+        # Verify folder is no longer in the list
+        folders = await client.get_all_folders()
+        folder_ids = [f.id for f in folders]
+        assert folder_id not in folder_ids
 
-    async def test_delete_folder_ungroups_projects(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test that deleting a folder ungroups its projects."""
+    async def test_delete_folder_projects_still_exist(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+        """Test that deleting a folder doesn't delete its projects.
+
+        Note: TickTick does NOT automatically ungroup projects when their folder
+        is deleted. Projects retain their group_id as a "dangling reference" to
+        the deleted folder. The important behavior is that projects remain accessible.
+        """
         folder = await client.create_folder(name="Folder")
         project1 = await client.create_project(name="Project 1", folder_id=folder.id)
         project2 = await client.create_project(name="Project 2", folder_id=folder.id)
 
         await client.delete_folder(folder.id)
 
-        # Projects should still exist but be ungrouped
-        assert project1.id in mock_api.projects
-        assert project2.id in mock_api.projects
-        assert mock_api.projects[project1.id].group_id is None
-        assert mock_api.projects[project2.id].group_id is None
+        # Projects should still exist and be accessible
+        retrieved_project1 = await client.get_project(project1.id)
+        retrieved_project2 = await client.get_project(project2.id)
+        assert retrieved_project1 is not None
+        assert retrieved_project2 is not None
+        assert retrieved_project1.name == "Project 1"
+        assert retrieved_project2.name == "Project 2"
 
     async def test_delete_nonexistent_folder(self, client: TickTickClient):
         """Test deleting a folder that doesn't exist."""
@@ -136,7 +152,10 @@ class TestFolderDeletion:
 
         await client.delete_folder(folder.id)
 
-        assert folder.id not in mock_api.folders
+        # Verify folder is no longer in the list
+        folders = await client.get_all_folders()
+        folder_ids = [f.id for f in folders]
+        assert folder.id not in folder_ids
 
 
 # =============================================================================
@@ -219,10 +238,15 @@ class TestFolderCombinations:
         # Delete folder
         await client.delete_folder(folder.id)
 
-        # Verify folder deleted but projects remain ungrouped
-        assert folder.id not in mock_api.folders
-        assert project1.id in mock_api.projects
-        assert project2.id in mock_api.projects
+        # Verify folder deleted but projects remain accessible
+        folders = await client.get_all_folders()
+        assert folder.id not in [f.id for f in folders]
+
+        # Projects should still exist
+        retrieved_p1 = await client.get_project(project1.id)
+        retrieved_p2 = await client.get_project(project2.id)
+        assert retrieved_p1 is not None
+        assert retrieved_p2 is not None
 
     async def test_complex_folder_structure(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test complex folder structure with tasks."""
@@ -237,18 +261,28 @@ class TestFolderCombinations:
         inbox_tasks = await client.create_project(name="Quick Tasks")  # No folder
 
         # Add tasks
-        await client.create_task(title="Client A Task", project_id=work_project1.id)
-        await client.create_task(title="Client B Task", project_id=work_project2.id)
-        await client.create_task(title="Home Task", project_id=personal_project.id)
-        await client.create_task(title="Quick Task", project_id=inbox_tasks.id)
+        task1 = await client.create_task(title="Client A Task", project_id=work_project1.id)
+        task2 = await client.create_task(title="Client B Task", project_id=work_project2.id)
+        task3 = await client.create_task(title="Home Task", project_id=personal_project.id)
+        task4 = await client.create_task(title="Quick Task", project_id=inbox_tasks.id)
 
-        # Verify structure
-        assert len(mock_api.folders) == 2
-        assert len(mock_api.projects) == 4
-        assert len(mock_api.tasks) == 4
+        # Verify folder structure via client API
+        folders = await client.get_all_folders()
+        folder_ids = [f.id for f in folders]
+        assert work.id in folder_ids
+        assert personal.id in folder_ids
 
-        work_projects = [p for p in mock_api.projects.values() if p.group_id == work.id]
-        assert len(work_projects) == 2
+        # Verify projects have correct group assignments
+        assert work_project1.group_id == work.id
+        assert work_project2.group_id == work.id
+        assert personal_project.group_id == personal.id
+        assert inbox_tasks.group_id is None
+
+        # Verify tasks are accessible
+        assert task1 is not None
+        assert task2 is not None
+        assert task3 is not None
+        assert task4 is not None
 
     async def test_delete_folder_preserves_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that deleting folder preserves tasks in its projects."""
@@ -260,6 +294,10 @@ class TestFolderCombinations:
 
         await client.delete_folder(folder.id)
 
-        # Tasks should still exist
-        assert task1.id in mock_api.tasks
-        assert task2.id in mock_api.tasks
+        # Tasks should still exist and be accessible via client API
+        retrieved_task1 = await client.get_task(task1.id)
+        retrieved_task2 = await client.get_task(task2.id)
+        assert retrieved_task1 is not None
+        assert retrieved_task2 is not None
+        assert retrieved_task1.title == "Task 1"
+        assert retrieved_task2.title == "Task 2"

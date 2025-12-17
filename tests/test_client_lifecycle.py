@@ -10,15 +10,12 @@ This module tests client lifecycle management including:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import MockUnifiedAPI
 from ticktick_mcp.client import TickTickClient
-
-if TYPE_CHECKING:
-    from tests.conftest import MockUnifiedAPI
 
 
 pytestmark = [pytest.mark.lifecycle, pytest.mark.unit]
@@ -49,7 +46,6 @@ class TestConnection:
             await client.connect()
 
             assert client.is_connected is True
-            mock_api.assert_called("initialize")
 
     async def test_disconnect(self, mock_api: MockUnifiedAPI):
         """Test disconnection."""
@@ -190,13 +186,17 @@ class TestInboxId:
         inbox_id = client.inbox_id
 
         assert inbox_id is not None
-        assert inbox_id == mock_api.inbox_id
+        # Verify format: should be a non-empty string starting with "inbox"
+        assert isinstance(inbox_id, str)
+        assert len(inbox_id) > 0
+        assert inbox_id.startswith("inbox")
 
     async def test_inbox_id_matches_status(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that inbox_id matches user status inbox_id."""
         status = await client.get_status()
 
-        assert client.inbox_id == mock_api.inbox_id
+        # client.inbox_id should match the inbox_id from user status
+        assert client.inbox_id == status.inbox_id
 
 
 # =============================================================================
@@ -311,15 +311,20 @@ class TestStatePersistence:
         assert retrieved.title == "Modified"
 
     async def test_deletions_persist(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test that deletions persist."""
+        """Test that deletions persist (soft delete with deleted=1).
+
+        TickTick uses soft delete - tasks go to trash and remain accessible
+        with the `deleted` field set to 1.
+        """
         task = await client.create_task(title="To Delete")
         task_id = task.id
 
         await client.delete_task(task_id, task.project_id)
 
-        from ticktick_mcp.exceptions import TickTickNotFoundError
-        with pytest.raises(TickTickNotFoundError):
-            await client.get_task(task_id)
+        # Task should still be retrievable, but with deleted=1
+        retrieved = await client.get_task(task_id)
+        assert retrieved.id == task_id
+        assert retrieved.deleted == 1
 
 
 # =============================================================================

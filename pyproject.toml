@@ -38,6 +38,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.12.0",
+    "python-dotenv>=1.0.0",  # For loading .env in live tests
     "mypy>=1.8.0",
     "ruff>=0.2.0",
     "respx>=0.21.0",  # For mocking httpx
@@ -52,6 +53,11 @@ packages = ["src/ticktick_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Use session scope for event loops to share httpx client in live mode
+# Without this, each test gets a new event loop, causing "Event loop is closed" errors
+# BOTH settings are needed - one for fixtures, one for tests
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 pythonpath = ["src"]
 

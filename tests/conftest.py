@@ -9,11 +9,20 @@ Architecture:
     - Factories: Generate test data (tasks, projects, tags, etc.)
     - Fixtures: Provide configured clients and mock data
     - Markers: Custom pytest markers for test categorization
+
+Live Mode:
+    Run tests against the real TickTick API with:
+        pytest --live
+
+    This requires a .env file with valid credentials.
+    Tests marked with @pytest.mark.mock_only will be skipped in live mode.
+    Tests marked with @pytest.mark.live_only will only run in live mode.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -41,6 +50,16 @@ from ticktick_mcp.constants import TaskStatus, TaskPriority, ProjectKind, ViewMo
 # =============================================================================
 
 
+def pytest_addoption(parser):
+    """Add custom command line options."""
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Run tests against real TickTick API (requires .env credentials)",
+    )
+
+
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "unit: Unit tests (fast, isolated)")
@@ -54,6 +73,33 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "sync: Sync-related tests")
     config.addinivalue_line("markers", "errors: Error handling tests")
     config.addinivalue_line("markers", "lifecycle: Client lifecycle tests")
+    config.addinivalue_line("markers", "mock_only: Tests that only work with mocks (skipped in --live mode)")
+    config.addinivalue_line("markers", "live_only: Tests that only run in --live mode")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Handle live/mock test filtering and event loop scope."""
+    live_mode = config.getoption("--live")
+
+    skip_in_live = pytest.mark.skip(reason="Test only works with mocks (use without --live)")
+    skip_in_mock = pytest.mark.skip(reason="Test only works with real API (use --live)")
+
+    # In live mode, use session-scoped event loop to share httpx client
+    session_loop_marker = pytest.mark.asyncio(loop_scope="session")
+
+    for item in items:
+        if live_mode:
+            # In live mode, skip mock_only tests
+            if "mock_only" in item.keywords:
+                item.add_marker(skip_in_live)
+            # Use session-scoped event loop for live tests
+            # This allows sharing the httpx client across tests
+            if asyncio.iscoroutinefunction(item.obj):
+                item.add_marker(session_loop_marker)
+        else:
+            # In mock mode, skip live_only tests
+            if "live_only" in item.keywords:
+                item.add_marker(skip_in_mock)
 
 
 # =============================================================================
@@ -565,10 +611,13 @@ class MockUnifiedAPI:
         self._record_call("create_task", (title,), {"project_id": project_id, **kwargs})
         self._check_failure("create_task")
 
+        # Filter out None values to allow factory defaults to apply
+        filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
         task = TaskFactory.create(
             title=title,
             project_id=project_id or self.inbox_id,
-            **kwargs,
+            **filtered_kwargs,
         )
         self.tasks[task.id] = task
         return task
@@ -610,7 +659,11 @@ class MockUnifiedAPI:
         task.completed_time = utc_now()
 
     async def delete_task(self, task_id: str, project_id: str) -> None:
-        """Mock delete task."""
+        """Mock delete task (soft delete - set deleted=1).
+
+        Matches actual API behavior: tasks go to trash with deleted=1,
+        not permanently removed.
+        """
         self._record_call("delete_task", (task_id, project_id), {})
         self._check_failure("delete_task")
 
@@ -618,14 +671,16 @@ class MockUnifiedAPI:
             from ticktick_mcp.exceptions import TickTickNotFoundError
             raise TickTickNotFoundError(f"Task not found: {task_id}")
 
-        del self.tasks[task_id]
+        # Soft delete - set deleted flag instead of removing
+        self.tasks[task_id].deleted = 1
 
     async def list_all_tasks(self) -> list[Task]:
-        """Mock list all tasks."""
+        """Mock list all tasks (excludes deleted tasks)."""
         self._record_call("list_all_tasks", (), {})
         self._check_failure("list_all_tasks")
 
-        return [t for t in self.tasks.values() if t.status == TaskStatus.ACTIVE]
+        # Return active, non-deleted tasks
+        return [t for t in self.tasks.values() if t.status == TaskStatus.ACTIVE and t.deleted == 0]
 
     async def list_completed_tasks(
         self,
@@ -637,12 +692,18 @@ class MockUnifiedAPI:
         self._record_call("list_completed_tasks", (from_date, to_date), {"limit": limit})
         self._check_failure("list_completed_tasks")
 
-        completed = [
-            t for t in self.tasks.values()
-            if t.status == TaskStatus.COMPLETED
-            and t.completed_time
-            and from_date <= t.completed_time <= to_date
-        ]
+        # Normalize dates to be timezone-aware for comparison
+        from_aware = from_date.replace(tzinfo=timezone.utc) if from_date.tzinfo is None else from_date
+        to_aware = to_date.replace(tzinfo=timezone.utc) if to_date.tzinfo is None else to_date
+
+        completed = []
+        for t in self.tasks.values():
+            if t.status == TaskStatus.COMPLETED and t.completed_time:
+                ct = t.completed_time
+                ct_aware = ct.replace(tzinfo=timezone.utc) if ct.tzinfo is None else ct
+                if from_aware <= ct_aware <= to_aware:
+                    completed.append(t)
+
         return completed[:limit]
 
     async def move_task(
@@ -772,7 +833,11 @@ class MockUnifiedAPI:
         return folder
 
     async def delete_project_group(self, group_id: str) -> None:
-        """Mock delete project group."""
+        """Mock delete project group.
+
+        Note: TickTick does NOT automatically ungroup projects when their folder
+        is deleted. Projects retain their group_id as a "dangling reference".
+        """
         self._record_call("delete_project_group", (group_id,), {})
         self._check_failure("delete_project_group")
 
@@ -781,10 +846,7 @@ class MockUnifiedAPI:
             raise TickTickNotFoundError(f"Folder not found: {group_id}")
 
         del self.folders[group_id]
-        # Ungroup projects in this folder
-        for project in self.projects.values():
-            if project.group_id == group_id:
-                project.group_id = None
+        # Note: Do NOT ungroup projects - TickTick leaves group_id as-is
 
     # -------------------------------------------------------------------------
     # Tag Operations
@@ -1013,6 +1075,12 @@ def id_generator():
 
 
 @pytest.fixture
+def live_mode(request) -> bool:
+    """Check if running in live mode."""
+    return request.config.getoption("--live")
+
+
+@pytest.fixture
 def mock_api() -> MockUnifiedAPI:
     """Create a fresh mock API instance."""
     return MockUnifiedAPI()
@@ -1026,53 +1094,442 @@ def seeded_mock_api() -> MockUnifiedAPI:
     return api
 
 
-@pytest.fixture
-async def client(mock_api: MockUnifiedAPI) -> AsyncIterator[TickTickClient]:
+# =============================================================================
+# Session-Scoped Event Loop (for live mode)
+# =============================================================================
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create a session-scoped event loop.
+
+    This is necessary for live tests where we share an httpx client
+    across all tests. Without this, each test gets a new event loop,
+    causing "Event loop is closed" errors when the shared client
+    tries to use connections from a closed event loop.
     """
-    Create a TickTickClient with mocked API.
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
+    yield loop
+    loop.close()
 
-    This fixture patches the UnifiedTickTickAPI to use our mock,
-    allowing tests to run without actual API calls.
+
+# =============================================================================
+# Live Client Management
+# =============================================================================
+
+# Global storage for live client (session-wide)
+_live_client: TickTickClient | None = None
+_live_client_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _get_live_client() -> TickTickClient:
+    """Get or create a live client for the current event loop.
+
+    ALWAYS creates a new client for each request to avoid event loop issues.
+    This means re-authenticating each time, but it's the only reliable way
+    to avoid "bound to a different event loop" errors.
+
+    For live tests, we accept the overhead of re-authentication because:
+    1. The alternative (sharing clients across event loops) simply doesn't work
+    2. Re-authentication is fast (~1 second)
     """
-    with patch("ticktick_mcp.client.client.UnifiedTickTickAPI") as MockAPIClass:
-        MockAPIClass.return_value = mock_api
+    from dotenv import load_dotenv
+    load_dotenv()
 
-        # Create client with dummy credentials
-        client = TickTickClient(
-            client_id="test_client_id",
-            client_secret="test_client_secret",
-            v1_access_token="test_access_token",
-            username="test@example.com",
-            password="test_password",
-        )
+    # Check for required credentials
+    required_vars = [
+        "TICKTICK_CLIENT_ID",
+        "TICKTICK_CLIENT_SECRET",
+        "TICKTICK_ACCESS_TOKEN",
+        "TICKTICK_USERNAME",
+        "TICKTICK_PASSWORD",
+    ]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    if missing:
+        pytest.skip(f"Live mode requires environment variables: {', '.join(missing)}")
 
-        # Replace the internal API with our mock
-        client._api = mock_api
+    # Always create a fresh client for the current event loop
+    client = TickTickClient(
+        client_id=os.environ["TICKTICK_CLIENT_ID"],
+        client_secret=os.environ["TICKTICK_CLIENT_SECRET"],
+        v1_access_token=os.environ["TICKTICK_ACCESS_TOKEN"],
+        username=os.environ["TICKTICK_USERNAME"],
+        password=os.environ["TICKTICK_PASSWORD"],
+        redirect_uri=os.environ.get("TICKTICK_REDIRECT_URI", "http://127.0.0.1:8080/callback"),
+    )
 
-        await client.connect()
-        yield client
-        await client.disconnect()
+    await client.connect()
+    return client
+
+
+def _create_live_client_sync() -> TickTickClient:
+    """Create a live client (sync wrapper for async creation)."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    # Check for required credentials
+    required_vars = [
+        "TICKTICK_CLIENT_ID",
+        "TICKTICK_CLIENT_SECRET",
+        "TICKTICK_ACCESS_TOKEN",
+        "TICKTICK_USERNAME",
+        "TICKTICK_PASSWORD",
+    ]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    if missing:
+        pytest.skip(f"Live mode requires environment variables: {', '.join(missing)}")
+
+    return TickTickClient(
+        client_id=os.environ["TICKTICK_CLIENT_ID"],
+        client_secret=os.environ["TICKTICK_CLIENT_SECRET"],
+        v1_access_token=os.environ["TICKTICK_ACCESS_TOKEN"],
+        username=os.environ["TICKTICK_USERNAME"],
+        password=os.environ["TICKTICK_PASSWORD"],
+        redirect_uri=os.environ.get("TICKTICK_REDIRECT_URI", "http://127.0.0.1:8080/callback"),
+    )
+
+
+# =============================================================================
+# Live Mode Resource Cleanup
+# =============================================================================
+
+
+class LiveResourceTracker:
+    """Tracks resources created during live tests for cleanup.
+
+    This ensures we don't exceed TickTick's resource limits (e.g., 9 projects
+    for free accounts) by cleaning up after each test.
+
+    Features:
+    - Tracks tasks, projects, folders, and tags
+    - Handles renamed tags (updates tracked name)
+    - Handles merged tags (removes source from tracking)
+    - Handles moved tasks (updates project_id)
+    - Handles explicit deletions (removes from tracking to avoid double-delete)
+    - Cleans up in dependency order (tasks -> projects -> folders -> tags)
+    """
+
+    def __init__(self):
+        self.tasks: dict[str, str] = {}  # task_id -> project_id
+        self.projects: set[str] = set()  # project_ids
+        self.folders: set[str] = set()  # folder_ids
+        self.tags: set[str] = set()  # tag_names (lowercase)
+
+    # -------------------------------------------------------------------------
+    # Track operations (called when resources are created)
+    # -------------------------------------------------------------------------
+
+    def track_task(self, task_id: str, project_id: str) -> None:
+        """Track a created task for cleanup."""
+        self.tasks[task_id] = project_id
+
+    def track_project(self, project_id: str) -> None:
+        """Track a created project for cleanup."""
+        self.projects.add(project_id)
+
+    def track_folder(self, folder_id: str) -> None:
+        """Track a created folder for cleanup."""
+        self.folders.add(folder_id)
+
+    def track_tag(self, tag_name: str) -> None:
+        """Track a created tag for cleanup."""
+        # Tags are stored lowercase (TickTick normalizes them)
+        self.tags.add(tag_name.lower())
+
+    # -------------------------------------------------------------------------
+    # Update operations (called when resources are modified)
+    # -------------------------------------------------------------------------
+
+    def update_task_project(self, task_id: str, new_project_id: str) -> None:
+        """Update the project_id for a moved task."""
+        if task_id in self.tasks:
+            self.tasks[task_id] = new_project_id
+
+    def rename_tag(self, old_name: str, new_name: str) -> None:
+        """Update tracking when a tag is renamed."""
+        old_lower = old_name.lower()
+        new_lower = new_name.lower()
+        if old_lower in self.tags:
+            self.tags.discard(old_lower)
+            self.tags.add(new_lower)
+
+    def merge_tags(self, source_name: str, target_name: str) -> None:
+        """Update tracking when tags are merged.
+
+        The source tag is deleted by TickTick, so remove it from tracking.
+        The target tag remains (add it if not already tracked).
+        """
+        source_lower = source_name.lower()
+        target_lower = target_name.lower()
+        self.tags.discard(source_lower)
+        # Don't add target - it might be a pre-existing tag we shouldn't delete
+
+    # -------------------------------------------------------------------------
+    # Untrack operations (called when resources are explicitly deleted)
+    # -------------------------------------------------------------------------
+
+    def untrack_task(self, task_id: str) -> None:
+        """Remove a task from tracking (it was explicitly deleted)."""
+        self.tasks.pop(task_id, None)
+
+    def untrack_project(self, project_id: str) -> None:
+        """Remove a project from tracking (it was explicitly deleted)."""
+        self.projects.discard(project_id)
+
+    def untrack_folder(self, folder_id: str) -> None:
+        """Remove a folder from tracking (it was explicitly deleted)."""
+        self.folders.discard(folder_id)
+
+    def untrack_tag(self, tag_name: str) -> None:
+        """Remove a tag from tracking (it was explicitly deleted)."""
+        self.tags.discard(tag_name.lower())
+
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+
+    async def cleanup(self, client: TickTickClient) -> None:
+        """Delete all tracked resources in the correct order.
+
+        Order: tasks -> projects -> folders -> tags
+        (respects dependencies - can't delete project with tasks, etc.)
+        """
+        # Delete tasks first (they belong to projects)
+        # Note: We fetch each task first to get the CURRENT project_id,
+        # because it may have been moved since we tracked it.
+        for task_id, tracked_project_id in list(self.tasks.items()):
+            try:
+                # Try to get the task's current state for accurate project_id
+                task = await client.get_task(task_id)
+                actual_project_id = task.project_id
+                await client.delete_task(task_id, actual_project_id)
+            except Exception:
+                # If get_task fails, try with tracked project_id as fallback
+                try:
+                    await client.delete_task(task_id, tracked_project_id)
+                except Exception:
+                    pass  # Ignore errors during cleanup (already deleted, etc.)
+
+        # Delete projects (they may belong to folders)
+        for project_id in list(self.projects):
+            try:
+                await client.delete_project(project_id)
+            except Exception:
+                pass
+
+        # Delete folders
+        for folder_id in list(self.folders):
+            try:
+                await client.delete_folder(folder_id)
+            except Exception:
+                pass
+
+        # Delete tags
+        for tag_name in list(self.tags):
+            try:
+                await client.delete_tag(tag_name)
+            except Exception:
+                pass
+
+        # Clear all tracking
+        self.tasks.clear()
+        self.projects.clear()
+        self.folders.clear()
+        self.tags.clear()
+
+
+class TrackingClientWrapper:
+    """Wraps TickTickClient to automatically track created/modified resources.
+
+    This wrapper intercepts all resource-modifying operations to maintain
+    accurate tracking for cleanup. It handles:
+
+    - create_* methods: Track new resources
+    - delete_* methods: Untrack deleted resources (avoid double-delete)
+    - rename_tag: Update tag name in tracking
+    - merge_tags: Remove source tag from tracking
+    - move_task: Update task's project_id in tracking
+    """
+
+    def __init__(self, client: TickTickClient, tracker: LiveResourceTracker):
+        self._client = client
+        self._tracker = tracker
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to the wrapped client."""
+        return getattr(self._client, name)
+
+    # -------------------------------------------------------------------------
+    # Create operations - track new resources
+    # -------------------------------------------------------------------------
+
+    async def create_task(self, *args, **kwargs) -> Task:
+        """Create a task and track it for cleanup."""
+        task = await self._client.create_task(*args, **kwargs)
+        self._tracker.track_task(task.id, task.project_id)
+        return task
+
+    async def quick_add(self, *args, **kwargs) -> Task:
+        """Quick add a task and track it for cleanup."""
+        task = await self._client.quick_add(*args, **kwargs)
+        self._tracker.track_task(task.id, task.project_id)
+        return task
+
+    async def create_project(self, *args, **kwargs) -> Project:
+        """Create a project and track it for cleanup."""
+        project = await self._client.create_project(*args, **kwargs)
+        self._tracker.track_project(project.id)
+        return project
+
+    async def create_folder(self, *args, **kwargs) -> ProjectGroup:
+        """Create a folder and track it for cleanup."""
+        folder = await self._client.create_folder(*args, **kwargs)
+        self._tracker.track_folder(folder.id)
+        return folder
+
+    async def create_tag(self, *args, **kwargs) -> Tag:
+        """Create a tag and track it for cleanup."""
+        tag = await self._client.create_tag(*args, **kwargs)
+        self._tracker.track_tag(tag.name)
+        return tag
+
+    # -------------------------------------------------------------------------
+    # Delete operations - untrack to avoid double-delete during cleanup
+    # -------------------------------------------------------------------------
+
+    async def delete_task(self, task_id: str, project_id: str) -> None:
+        """Delete a task and untrack it."""
+        await self._client.delete_task(task_id, project_id)
+        self._tracker.untrack_task(task_id)
+
+    async def delete_project(self, project_id: str) -> None:
+        """Delete a project and untrack it."""
+        await self._client.delete_project(project_id)
+        self._tracker.untrack_project(project_id)
+
+    async def delete_folder(self, folder_id: str) -> None:
+        """Delete a folder and untrack it."""
+        await self._client.delete_folder(folder_id)
+        self._tracker.untrack_folder(folder_id)
+
+    async def delete_tag(self, tag_name: str) -> None:
+        """Delete a tag and untrack it."""
+        await self._client.delete_tag(tag_name)
+        self._tracker.untrack_tag(tag_name)
+
+    # -------------------------------------------------------------------------
+    # Modify operations - update tracking to reflect changes
+    # -------------------------------------------------------------------------
+
+    async def rename_tag(self, old_name: str, new_name: str) -> None:
+        """Rename a tag and update tracking."""
+        await self._client.rename_tag(old_name, new_name)
+        self._tracker.rename_tag(old_name, new_name)
+
+    async def merge_tags(self, source_name: str, target_name: str) -> None:
+        """Merge tags and update tracking (source is deleted)."""
+        await self._client.merge_tags(source_name, target_name)
+        self._tracker.merge_tags(source_name, target_name)
+
+    async def move_task(
+        self, task_id: str, from_project_id: str, to_project_id: str
+    ) -> None:
+        """Move a task and update tracking."""
+        await self._client.move_task(task_id, from_project_id, to_project_id)
+        self._tracker.update_task_project(task_id, to_project_id)
 
 
 @pytest.fixture
-async def seeded_client(seeded_mock_api: MockUnifiedAPI) -> AsyncIterator[TickTickClient]:
-    """Create a TickTickClient with seeded test data."""
-    with patch("ticktick_mcp.client.client.UnifiedTickTickAPI") as MockAPIClass:
-        MockAPIClass.return_value = seeded_mock_api
+async def client(request) -> AsyncIterator[TickTickClient]:
+    """
+    Create a TickTickClient.
 
-        client = TickTickClient(
-            client_id="test_client_id",
-            client_secret="test_client_secret",
-            v1_access_token="test_access_token",
-            username="test@example.com",
-            password="test_password",
-        )
+    In normal mode: Uses mocked API (no real API calls).
+    In live mode (--live): Uses real TickTick API with credentials from .env.
+                           Creates a new client for each test.
+                           Automatically cleans up created resources after test.
 
-        client._api = seeded_mock_api
+    Live mode requires these environment variables:
+        - TICKTICK_CLIENT_ID
+        - TICKTICK_CLIENT_SECRET
+        - TICKTICK_ACCESS_TOKEN
+        - TICKTICK_USERNAME
+        - TICKTICK_PASSWORD
+    """
+    live_mode = request.config.getoption("--live")
 
-        await client.connect()
-        yield client
-        await client.disconnect()
+    if live_mode:
+        # Live mode: Create client with resource tracking for cleanup
+        real_client = _create_live_client_sync()
+        await real_client.connect()
+
+        # Wrap client to track created resources
+        tracker = LiveResourceTracker()
+        wrapped_client = TrackingClientWrapper(real_client, tracker)
+
+        yield wrapped_client  # type: ignore  # Tests use the wrapper
+
+        # Clean up all created resources after test completes
+        await tracker.cleanup(real_client)
+        await real_client.disconnect()
+    else:
+        # Mock mode: Get mock_api via request.getfixturevalue to avoid eager evaluation
+        mock_api = request.getfixturevalue("mock_api")
+
+        with patch("ticktick_mcp.client.client.UnifiedTickTickAPI") as MockAPIClass:
+            MockAPIClass.return_value = mock_api
+
+            # Create client with dummy credentials
+            client = TickTickClient(
+                client_id="test_client_id",
+                client_secret="test_client_secret",
+                v1_access_token="test_access_token",
+                username="test@example.com",
+                password="test_password",
+            )
+
+            # Replace the internal API with our mock
+            client._api = mock_api
+
+            await client.connect()
+            yield client
+            await client.disconnect()
+
+
+@pytest.fixture
+async def seeded_client(request, seeded_mock_api: MockUnifiedAPI) -> AsyncIterator[TickTickClient]:
+    """Create a TickTickClient with seeded test data (mock mode only)."""
+    live_mode = request.config.getoption("--live")
+
+    if live_mode:
+        # In live mode, seeded_client uses real client with cleanup
+        real_client = _create_live_client_sync()
+        await real_client.connect()
+
+        tracker = LiveResourceTracker()
+        wrapped_client = TrackingClientWrapper(real_client, tracker)
+
+        yield wrapped_client  # type: ignore
+
+        await tracker.cleanup(real_client)
+        await real_client.disconnect()
+    else:
+        with patch("ticktick_mcp.client.client.UnifiedTickTickAPI") as MockAPIClass:
+            MockAPIClass.return_value = seeded_mock_api
+
+            client = TickTickClient(
+                client_id="test_client_id",
+                client_secret="test_client_secret",
+                v1_access_token="test_access_token",
+                username="test@example.com",
+                password="test_password",
+            )
+
+            client._api = seeded_mock_api
+
+            await client.connect()
+            yield client
+            await client.disconnect()
 
 
 # =============================================================================

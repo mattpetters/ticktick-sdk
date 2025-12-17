@@ -35,7 +35,6 @@ class TestUserProfile:
 
         assert profile is not None
         assert profile.username is not None
-        mock_api.assert_called("get_user_profile")
 
     async def test_get_profile_has_expected_fields(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that profile has all expected fields."""
@@ -48,8 +47,12 @@ class TestUserProfile:
         assert hasattr(profile, "locale")
         assert hasattr(profile, "verified_email")
 
+    @pytest.mark.mock_only
     async def test_get_profile_returns_configured_user(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test that profile returns the configured mock user."""
+        """Test that profile returns the configured mock user.
+
+        Mock-only because it tests mock configuration, not API behavior.
+        """
         # Set specific user data
         mock_api.user.username = "custom@example.com"
         mock_api.user.display_name = "Custom User"
@@ -75,7 +78,6 @@ class TestUserStatus:
         status = await client.get_status()
 
         assert status is not None
-        mock_api.assert_called("get_user_status")
 
     async def test_get_status_has_expected_fields(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that status has all expected fields."""
@@ -87,8 +89,12 @@ class TestUserStatus:
         assert hasattr(status, "is_pro")
         assert hasattr(status, "team_user")
 
+    @pytest.mark.mock_only
     async def test_get_status_pro_user(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting status for Pro user."""
+        """Test getting status for Pro user.
+
+        Mock-only because it tests mock configuration.
+        """
         mock_api.user_status.is_pro = True
         mock_api.user_status.pro_end_date = "2026-12-31"
 
@@ -97,8 +103,12 @@ class TestUserStatus:
         assert status.is_pro is True
         assert status.pro_end_date == "2026-12-31"
 
+    @pytest.mark.mock_only
     async def test_get_status_free_user(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting status for free user."""
+        """Test getting status for free user.
+
+        Mock-only because it tests mock configuration.
+        """
         mock_api.user_status.is_pro = False
         mock_api.user_status.pro_end_date = None
 
@@ -106,21 +116,25 @@ class TestUserStatus:
 
         assert status.is_pro is False
 
+    @pytest.mark.mock_only
     async def test_get_status_team_user(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting status for team user."""
+        """Test getting status for team user.
+
+        Mock-only because it tests mock configuration.
+        """
         mock_api.user_status.team_user = True
 
         status = await client.get_status()
 
         assert status.team_user is True
 
-    async def test_get_status_inbox_id(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+    async def test_get_status_inbox_id(self, client: TickTickClient):
         """Test that status includes inbox ID."""
-        mock_api.user_status.inbox_id = "inbox999"
-
         status = await client.get_status()
 
-        assert status.inbox_id == "inbox999"
+        # Inbox ID should be present and start with "inbox"
+        assert status.inbox_id is not None
+        assert status.inbox_id.startswith("inbox")
 
 
 # =============================================================================
@@ -136,7 +150,6 @@ class TestUserStatistics:
         stats = await client.get_statistics()
 
         assert stats is not None
-        mock_api.assert_called("get_user_statistics")
 
     async def test_get_statistics_has_expected_fields(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that statistics has all expected fields."""
@@ -155,8 +168,12 @@ class TestUserStatistics:
         assert hasattr(stats, "today_pomo_count")
         assert hasattr(stats, "total_pomo_count")
 
+    @pytest.mark.mock_only
     async def test_get_statistics_completion_data(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test statistics completion data."""
+        """Test statistics completion data.
+
+        Mock-only because it tests specific mock values.
+        """
         mock_api.user_statistics.today_completed = 10
         mock_api.user_statistics.yesterday_completed = 8
         mock_api.user_statistics.total_completed = 1000
@@ -167,8 +184,12 @@ class TestUserStatistics:
         assert stats.yesterday_completed == 8
         assert stats.total_completed == 1000
 
+    @pytest.mark.mock_only
     async def test_get_statistics_scoring(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test statistics scoring data."""
+        """Test statistics scoring data.
+
+        Mock-only because it tests specific mock values.
+        """
         mock_api.user_statistics.score = 5000
         mock_api.user_statistics.level = 7
 
@@ -177,8 +198,12 @@ class TestUserStatistics:
         assert stats.score == 5000
         assert stats.level == 7
 
+    @pytest.mark.mock_only
     async def test_get_statistics_pomodoro_data(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test statistics pomodoro data."""
+        """Test statistics pomodoro data.
+
+        Mock-only because it tests specific mock values.
+        """
         mock_api.user_statistics.today_pomo_count = 5
         mock_api.user_statistics.yesterday_pomo_count = 8
         mock_api.user_statistics.total_pomo_count = 500
@@ -191,15 +216,14 @@ class TestUserStatistics:
         assert stats.yesterday_pomo_count == 8
         assert stats.total_pomo_count == 500
 
-    async def test_get_statistics_computed_properties(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+    async def test_get_statistics_computed_properties(self, client: TickTickClient):
         """Test computed properties on statistics."""
-        mock_api.user_statistics.total_pomo_duration = 36000  # 10 hours in seconds
-
         stats = await client.get_statistics()
 
         # Should have computed hours property
         assert hasattr(stats, "total_pomo_duration_hours")
-        assert stats.total_pomo_duration_hours == 10.0
+        # Duration hours should be non-negative
+        assert stats.total_pomo_duration_hours >= 0
 
 
 # =============================================================================
@@ -220,26 +244,19 @@ class TestUserCombinations:
         assert status is not None
         assert stats is not None
 
-        # Verify all endpoints were called
-        mock_api.assert_called("get_user_profile")
-        mock_api.assert_called("get_user_status")
-        mock_api.assert_called("get_user_statistics")
-
-    async def test_profile_and_status_username_match(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+    async def test_profile_and_status_username_match(self, client: TickTickClient):
         """Test that profile and status have consistent usernames."""
-        mock_api.user.username = "test@example.com"
-        mock_api.user_status.username = "test@example.com"
-
         profile = await client.get_profile()
         status = await client.get_status()
 
+        # Both should return the same username
         assert profile.username == status.username
 
-    async def test_user_info_with_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+    async def test_user_info_with_tasks(self, client: TickTickClient):
         """Test getting user info alongside task operations."""
         # Create some tasks
-        await client.create_task(title="Task 1")
-        await client.create_task(title="Task 2")
+        task1 = await client.create_task(title="UserInfoTest Task 1")
+        task2 = await client.create_task(title="UserInfoTest Task 2")
 
         # Get user info
         profile = await client.get_profile()
@@ -248,24 +265,20 @@ class TestUserCombinations:
         assert profile is not None
         assert stats is not None
 
-        # Tasks should still exist
+        # Our created tasks should exist in the task list
         tasks = await client.get_all_tasks()
-        assert len(tasks) == 2
+        task_ids = [t.id for t in tasks]
+        assert task1.id in task_ids
+        assert task2.id in task_ids
 
-    async def test_statistics_reflects_activity(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test that statistics data represents user activity."""
-        # Configure mock to show active user
-        mock_api.user_statistics.today_completed = 5
-        mock_api.user_statistics.total_completed = 1000
-        mock_api.user_statistics.level = 10
-        mock_api.user_statistics.score = 10000
-
+    async def test_statistics_reflects_activity(self, client: TickTickClient):
+        """Test that statistics data has valid structure."""
         stats = await client.get_statistics()
 
-        # Active user should have reasonable stats
-        assert stats.total_completed > 0
-        assert stats.level >= 1
-        assert stats.score > 0
+        # Statistics should have valid, non-negative values
+        assert stats.total_completed >= 0
+        assert stats.level >= 1  # Level starts at 1
+        assert stats.score >= 0
 
     async def test_multiple_profile_calls_consistent(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that multiple profile calls return consistent data."""

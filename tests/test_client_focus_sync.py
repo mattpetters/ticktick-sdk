@@ -37,7 +37,6 @@ class TestFocusHeatmap:
 
         assert data is not None
         assert isinstance(data, list)
-        mock_api.assert_called("get_focus_heatmap")
 
     async def test_get_focus_heatmap_with_days(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test getting focus heatmap with days parameter."""
@@ -76,6 +75,7 @@ class TestFocusHeatmap:
         for entry in data:
             assert "duration" in entry
 
+    @pytest.mark.mock_only
     async def test_get_focus_heatmap_empty_period(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test heatmap for period with no focus sessions."""
         # Configure mock to return empty
@@ -110,7 +110,6 @@ class TestFocusByTag:
 
         assert data is not None
         assert isinstance(data, dict)
-        mock_api.assert_called("get_focus_by_tag")
 
     async def test_get_focus_by_tag_with_days(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test getting focus by tag with days parameter."""
@@ -135,12 +134,15 @@ class TestFocusByTag:
         """Test that focus by tag returns tag -> duration mapping."""
         data = await client.get_focus_by_tag()
 
-        # Mock returns work and study tags
-        assert "work" in data
-        assert "study" in data
-        assert isinstance(data["work"], int)
-        assert isinstance(data["study"], int)
+        # Should be a dict mapping tag names to durations
+        assert isinstance(data, dict)
 
+        # If data exists, verify structure: string keys, int values
+        for tag_name, duration in data.items():
+            assert isinstance(tag_name, str), f"Tag name should be string, got {type(tag_name)}"
+            assert isinstance(duration, int), f"Duration should be int, got {type(duration)}"
+
+    @pytest.mark.mock_only
     async def test_get_focus_by_tag_empty(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test focus by tag when no focus data exists."""
         original_method = mock_api.get_focus_by_tag
@@ -185,61 +187,88 @@ class TestSync:
 
         assert state is not None
         assert isinstance(state, dict)
-        mock_api.assert_called("sync_all")
 
     async def test_sync_includes_inbox_id(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that sync state includes inbox ID."""
         state = await client.sync()
 
         assert "inboxId" in state
-        assert state["inboxId"] == mock_api.inbox_id
+        # Inbox ID should be a non-empty string starting with "inbox"
+        inbox_id = state["inboxId"]
+        assert isinstance(inbox_id, str)
+        assert len(inbox_id) > 0
+        assert inbox_id.startswith("inbox")
 
     async def test_sync_includes_projects(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that sync state includes projects."""
         # Create some projects
-        await client.create_project(name="Project 1")
-        await client.create_project(name="Project 2")
+        proj1 = await client.create_project(name="SyncTestProject1")
+        proj2 = await client.create_project(name="SyncTestProject2")
 
         state = await client.sync()
 
         assert "projectProfiles" in state
-        assert len(state["projectProfiles"]) == 2
+        assert isinstance(state["projectProfiles"], list)
+        # Created projects should be in the list
+        project_ids = [p.get("id") for p in state["projectProfiles"]]
+        assert proj1.id in project_ids
+        assert proj2.id in project_ids
 
     async def test_sync_includes_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that sync state includes tasks."""
         # Create some tasks
-        await client.create_task(title="Task 1")
-        await client.create_task(title="Task 2")
-        await client.create_task(title="Task 3")
+        task1 = await client.create_task(title="SyncTestTask1")
+        task2 = await client.create_task(title="SyncTestTask2")
+        task3 = await client.create_task(title="SyncTestTask3")
 
         state = await client.sync()
 
         assert "syncTaskBean" in state
         assert "update" in state["syncTaskBean"]
-        assert len(state["syncTaskBean"]["update"]) == 3
+        assert isinstance(state["syncTaskBean"]["update"], list)
+        # Created tasks should be in the list
+        task_ids = [t.get("id") for t in state["syncTaskBean"]["update"]]
+        assert task1.id in task_ids
+        assert task2.id in task_ids
+        assert task3.id in task_ids
 
     async def test_sync_includes_tags(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that sync state includes tags."""
-        await client.create_tag(name="Tag1")
-        await client.create_tag(name="Tag2")
+        tag1 = await client.create_tag(name="SyncTestTag1")
+        tag2 = await client.create_tag(name="SyncTestTag2")
 
         state = await client.sync()
 
         assert "tags" in state
-        assert len(state["tags"]) == 2
+        assert isinstance(state["tags"], list)
+        # Created tags should be in the list
+        tag_names = [t.get("name") for t in state["tags"]]
+        assert tag1.name in tag_names
+        assert tag2.name in tag_names
 
     async def test_sync_includes_folders(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that sync state includes folders."""
-        await client.create_folder(name="Folder 1")
-        await client.create_folder(name="Folder 2")
+        folder1 = await client.create_folder(name="SyncTestFolder1")
+        folder2 = await client.create_folder(name="SyncTestFolder2")
 
         state = await client.sync()
 
         assert "projectGroups" in state
-        assert len(state["projectGroups"]) == 2
+        # projectGroups may be None or a list
+        groups = state["projectGroups"] or []
+        assert isinstance(groups, list)
+        # Created folders should be in the list
+        group_ids = [g.get("id") for g in groups]
+        assert folder1.id in group_ids
+        assert folder2.id in group_ids
 
+    @pytest.mark.mock_only
     async def test_sync_empty_account(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test sync on empty account."""
+        """Test sync on empty account.
+
+        This test verifies behavior with no data, which can only be
+        reliably tested with a mock (live accounts have existing data).
+        """
         state = await client.sync()
 
         assert state["projectProfiles"] == []
@@ -252,26 +281,55 @@ class TestSync:
         # Initial sync
         initial_state = await client.sync()
         initial_task_count = len(initial_state["syncTaskBean"]["update"])
+        initial_project_count = len(initial_state["projectProfiles"])
 
         # Perform operations
-        await client.create_task(title="New Task")
-        await client.create_project(name="New Project")
+        new_task = await client.create_task(title="SyncAfterOpsTask")
+        new_project = await client.create_project(name="SyncAfterOpsProject")
 
         # Sync again
         final_state = await client.sync()
 
+        # Verify counts increased
         assert len(final_state["syncTaskBean"]["update"]) == initial_task_count + 1
-        assert len(final_state["projectProfiles"]) == 1
+        assert len(final_state["projectProfiles"]) == initial_project_count + 1
 
-    async def test_sync_complex_account(self, seeded_client: TickTickClient):
-        """Test sync on account with seeded data."""
-        state = await seeded_client.sync()
+        # Verify created items are in the response
+        task_ids = [t.get("id") for t in final_state["syncTaskBean"]["update"]]
+        project_ids = [p.get("id") for p in final_state["projectProfiles"]]
+        assert new_task.id in task_ids
+        assert new_project.id in project_ids
 
-        # Seeded data should be present
+    async def test_sync_complex_account(self, client: TickTickClient):
+        """Test sync on account with various data types.
+
+        Creates test data first to ensure sync returns all data types.
+        """
+        # Create various data types
+        folder = await client.create_folder(name="SyncTestFolder")
+        project = await client.create_project(name="SyncTestProject", folder_id=folder.id)
+        task = await client.create_task(title="SyncTestTask", project_id=project.id)
+        tag = await client.create_tag(name="SyncTestTag")
+
+        # Sync and verify all data types are returned
+        state = await client.sync()
+
+        # Verify our created items are in the sync response
         assert len(state["projectProfiles"]) > 0
         assert len(state["syncTaskBean"]["update"]) > 0
         assert len(state["tags"]) > 0
-        assert len(state["projectGroups"]) > 0
+        assert len(state["projectGroups"] or []) > 0
+
+        # Verify specific items exist
+        project_ids = [p.get("id") for p in state["projectProfiles"]]
+        task_ids = [t.get("id") for t in state["syncTaskBean"]["update"]]
+        tag_names = [t.get("name") for t in state["tags"]]
+        folder_ids = [f.get("id") for f in (state["projectGroups"] or [])]
+
+        assert project.id in project_ids
+        assert task.id in task_ids
+        assert tag.name in tag_names
+        assert folder.id in folder_ids
 
 
 # =============================================================================
@@ -283,8 +341,14 @@ class TestFocusSyncCombinations:
     """Tests for combinations of focus and sync operations."""
 
     @pytest.mark.focus
+    @pytest.mark.mock_only
     async def test_focus_data_with_tagged_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test focus data alongside tasks with tags."""
+        """Test focus data alongside tasks with tags.
+
+        Note: This is mock_only because focus data only comes from actual
+        Pomodoro timer usage, which can't be triggered via API. The mock
+        returns fake focus data, but the live API only returns real sessions.
+        """
         # Create tagged tasks
         await client.create_tag(name="Work")
         await client.create_tag(name="Study")
@@ -335,31 +399,41 @@ class TestFocusSyncCombinations:
         assert total_heatmap >= 0
         assert total_by_tag >= 0
 
-    async def test_full_data_retrieval_flow(self, seeded_client: TickTickClient):
-        """Test complete data retrieval flow."""
+    async def test_full_data_retrieval_flow(self, client: TickTickClient):
+        """Test complete data retrieval flow.
+
+        Creates test data first to ensure there's something to retrieve,
+        then verifies all retrieval methods work correctly.
+        """
+        # 0. Create some test data first
+        project = await client.create_project(name="RetrievalTestProject")
+        task = await client.create_task(title="RetrievalTestTask", project_id=project.id)
+
         # 1. Sync to get all data
-        state = await seeded_client.sync()
+        state = await client.sync()
         assert state is not None
 
         # 2. Get user info
-        profile = await seeded_client.get_profile()
-        status = await seeded_client.get_status()
-        stats = await seeded_client.get_statistics()
+        profile = await client.get_profile()
+        status = await client.get_status()
+        stats = await client.get_statistics()
 
         assert profile is not None
         assert status is not None
         assert stats is not None
 
         # 3. Get focus data
-        heatmap = await seeded_client.get_focus_heatmap()
-        by_tag = await seeded_client.get_focus_by_tag()
+        heatmap = await client.get_focus_heatmap()
+        by_tag = await client.get_focus_by_tag()
 
         assert heatmap is not None
         assert by_tag is not None
 
-        # 4. Get all tasks
-        tasks = await seeded_client.get_all_tasks()
-        projects = await seeded_client.get_all_projects()
+        # 4. Get all tasks and projects - verify our created items are present
+        tasks = await client.get_all_tasks()
+        projects = await client.get_all_projects()
 
         assert len(tasks) > 0
         assert len(projects) > 0
+        assert any(t.id == task.id for t in tasks)
+        assert any(p.id == project.id for p in projects)

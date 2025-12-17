@@ -37,7 +37,6 @@ class TestTagCreation:
         assert tag is not None
         assert tag.label == "SimpleTag"
         assert tag.name == "simpletag"  # Lowercase
-        mock_api.assert_called("create_tag")
 
     async def test_create_tag_with_color(self, client: TickTickClient):
         """Test creating a tag with color."""
@@ -75,7 +74,10 @@ class TestTagCreation:
             tags.append(tag)
 
         assert len(tags) == 4
-        assert len(mock_api.tags) == 4
+
+        # All names should be unique
+        names = [t.name for t in tags]
+        assert len(names) == len(set(names))
 
     async def test_create_tag_with_spaces(self, client: TickTickClient):
         """Test creating tag with spaces in name."""
@@ -104,16 +106,24 @@ class TestTagRetrieval:
 
     async def test_get_all_tags(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test getting all tags."""
-        await client.create_tag(name="Tag1")
-        await client.create_tag(name="Tag2")
-        await client.create_tag(name="Tag3")
+        tag1 = await client.create_tag(name="Tag1")
+        tag2 = await client.create_tag(name="Tag2")
+        tag3 = await client.create_tag(name="Tag3")
 
         tags = await client.get_all_tags()
 
-        assert len(tags) == 3
+        # Verify created tags are in the list
+        tag_names = [t.name for t in tags]
+        assert tag1.name in tag_names
+        assert tag2.name in tag_names
+        assert tag3.name in tag_names
 
+    @pytest.mark.mock_only
     async def test_get_all_tags_empty(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test getting tags when none exist."""
+        """Test getting tags when none exist.
+
+        Mock-only because live accounts may have existing tags.
+        """
         tags = await client.get_all_tags()
 
         assert tags == []
@@ -125,7 +135,6 @@ class TestTagRetrieval:
 
         tags = await client.get_all_tags()
 
-        assert len(tags) == 2
         child_tag = next(t for t in tags if t.name == child.name)
         assert child_tag.parent == parent.name
 
@@ -145,7 +154,10 @@ class TestTagDeletion:
 
         await client.delete_tag(tag_name)
 
-        assert tag_name not in mock_api.tags
+        # Verify tag is gone via client API
+        tags = await client.get_all_tags()
+        tag_names = [t.name for t in tags]
+        assert tag_name not in tag_names
 
     async def test_delete_tag_removes_from_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that deleting a tag removes it from tasks."""
@@ -156,8 +168,8 @@ class TestTagDeletion:
 
         await client.delete_tag(tag.name)
 
-        # Task should no longer have the tag
-        updated_task = mock_api.tasks[task.id]
+        # Task should no longer have the tag - verify via client API
+        updated_task = await client.get_task(task.id)
         assert tag.name not in updated_task.tags
 
     async def test_delete_nonexistent_tag(self, client: TickTickClient):
@@ -177,10 +189,13 @@ class TestTagDeletion:
 
         await client.delete_tag(tag.name)
 
-        # All tasks should have tag removed
-        assert tag.name not in mock_api.tasks[task1.id].tags
-        assert tag.name not in mock_api.tasks[task2.id].tags
-        assert tag.name not in mock_api.tasks[task3.id].tags
+        # All tasks should have tag removed - verify via client API
+        updated_task1 = await client.get_task(task1.id)
+        updated_task2 = await client.get_task(task2.id)
+        updated_task3 = await client.get_task(task3.id)
+        assert tag.name not in updated_task1.tags
+        assert tag.name not in updated_task2.tags
+        assert tag.name not in updated_task3.tags
 
 
 # =============================================================================
@@ -197,8 +212,11 @@ class TestTagRename:
 
         await client.rename_tag("oldname", "NewName")
 
-        assert "oldname" not in mock_api.tags
-        assert "newname" in mock_api.tags
+        # Verify via client API
+        tags = await client.get_all_tags()
+        tag_names = [t.name for t in tags]
+        assert "oldname" not in tag_names
+        assert "newname" in tag_names
 
     async def test_rename_tag_updates_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that renaming a tag updates tasks."""
@@ -207,7 +225,8 @@ class TestTagRename:
 
         await client.rename_tag(tag.name, "NewTag")
 
-        updated_task = mock_api.tasks[task.id]
+        # Verify via client API
+        updated_task = await client.get_task(task.id)
         assert "oldtag" not in [t.lower() for t in updated_task.tags]
         assert "newtag" in [t.lower() for t in updated_task.tags]
 
@@ -228,7 +247,9 @@ class TestTagRename:
 
         await client.rename_tag("coloredtag", "RenamedTag")
 
-        renamed_tag = mock_api.tags["renamedtag"]
+        # Verify via client API
+        tags = await client.get_all_tags()
+        renamed_tag = next(t for t in tags if t.name == "renamedtag")
         assert renamed_tag.color == "#F18181"
 
 
@@ -247,10 +268,13 @@ class TestTagMerge:
 
         await client.merge_tags(source.name, target.name)
 
+        # Verify via client API
+        tags = await client.get_all_tags()
+        tag_names = [t.name for t in tags]
         # Source should be deleted
-        assert source.name not in mock_api.tags
+        assert source.name not in tag_names
         # Target should still exist
-        assert target.name in mock_api.tags
+        assert target.name in tag_names
 
     async def test_merge_tags_moves_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test that merging moves tasks to target tag."""
@@ -262,11 +286,13 @@ class TestTagMerge:
 
         await client.merge_tags(source.name, target.name)
 
-        # Tasks should now have target tag instead of source
-        assert target.name in mock_api.tasks[task1.id].tags
-        assert target.name in mock_api.tasks[task2.id].tags
-        assert source.name not in mock_api.tasks[task1.id].tags
-        assert source.name not in mock_api.tasks[task2.id].tags
+        # Tasks should now have target tag instead of source - verify via client API
+        updated_task1 = await client.get_task(task1.id)
+        updated_task2 = await client.get_task(task2.id)
+        assert target.name in updated_task1.tags
+        assert target.name in updated_task2.tags
+        assert source.name not in updated_task1.tags
+        assert source.name not in updated_task2.tags
 
     async def test_merge_nonexistent_source(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test merging nonexistent source tag."""
@@ -296,8 +322,8 @@ class TestTagMerge:
 
         await client.merge_tags(source.name, target.name)
 
-        # Should only have target once
-        updated_task = mock_api.tasks[task.id]
+        # Should only have target once - verify via client API
+        updated_task = await client.get_task(task.id)
         target_count = sum(1 for t in updated_task.tags if t.lower() == target.name)
         assert target_count == 1
 
@@ -344,14 +370,17 @@ class TestTagTaskRelationships:
         work = await client.create_tag(name="Work")
         personal = await client.create_tag(name="Personal")
 
-        await client.create_task(title="Work Task 1", tags=[work.name])
-        await client.create_task(title="Work Task 2", tags=[work.name])
+        task1 = await client.create_task(title="Work Task 1", tags=[work.name])
+        task2 = await client.create_task(title="Work Task 2", tags=[work.name])
         await client.create_task(title="Personal Task", tags=[personal.name])
         await client.create_task(title="No Tag Task")
 
         work_tasks = await client.get_tasks_by_tag(work.name)
 
-        assert len(work_tasks) == 2
+        # Verify our work tasks are in the results
+        work_task_ids = [t.id for t in work_tasks]
+        assert task1.id in work_task_ids
+        assert task2.id in work_task_ids
 
     async def test_update_task_tags(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test updating task tags."""
@@ -386,15 +415,15 @@ class TestTagCombinations:
         # Rename
         await client.rename_tag(tag.name, "RenamedTag")
 
-        # Verify task updated
-        updated_task = mock_api.tasks[task.id]
+        # Verify task updated via client API
+        updated_task = await client.get_task(task.id)
         assert "renamedtag" in [t.lower() for t in updated_task.tags]
 
         # Delete
         await client.delete_tag("renamedtag")
 
-        # Verify removed from task
-        final_task = mock_api.tasks[task.id]
+        # Verify removed from task via client API
+        final_task = await client.get_task(task.id)
         assert len(final_task.tags) == 0
 
     async def test_complex_tag_hierarchy(self, client: TickTickClient, mock_api: MockUnifiedAPI):
@@ -409,9 +438,13 @@ class TestTagCombinations:
         await client.create_task(title="Client A Task", tags=[client_a.name])
         await client.create_task(title="Client B Task", tags=[client_b.name])
 
-        # Verify hierarchy
+        # Verify hierarchy via client API
         tags = await client.get_all_tags()
-        assert len(tags) == 4
+        tag_names = [t.name for t in tags]
+        assert work.name in tag_names
+        assert projects.name in tag_names
+        assert client_a.name in tag_names
+        assert client_b.name in tag_names
 
         client_a_tag = next(t for t in tags if t.name == client_a.name)
         assert client_a_tag.parent == projects.name
@@ -421,20 +454,25 @@ class TestTagCombinations:
         urgent = await client.create_tag(name="Urgent")
         important = await client.create_tag(name="Important")
 
-        await client.create_task(title="Task 1", tags=[urgent.name])
-        await client.create_task(title="Task 2", tags=[urgent.name])
-        await client.create_task(title="Task 3", tags=[important.name])
+        task1 = await client.create_task(title="Task 1", tags=[urgent.name])
+        task2 = await client.create_task(title="Task 2", tags=[urgent.name])
+        task3 = await client.create_task(title="Task 3", tags=[important.name])
 
         # Before merge
         urgent_tasks = await client.get_tasks_by_tag(urgent.name)
-        assert len(urgent_tasks) == 2
+        urgent_task_ids = [t.id for t in urgent_tasks]
+        assert task1.id in urgent_task_ids
+        assert task2.id in urgent_task_ids
 
         # Merge urgent into important
         await client.merge_tags(urgent.name, important.name)
 
         # After merge - all should be in important
         important_tasks = await client.get_tasks_by_tag(important.name)
-        assert len(important_tasks) == 3
+        important_task_ids = [t.id for t in important_tasks]
+        assert task1.id in important_task_ids
+        assert task2.id in important_task_ids
+        assert task3.id in important_task_ids
 
     async def test_bulk_tag_operations(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test bulk tag creation and usage."""
@@ -445,13 +483,17 @@ class TestTagCombinations:
             tags.append(tag)
 
         # Create tasks with various tag combinations
-        await client.create_task(title="Task 1", tags=[tags[0].name, tags[1].name])
+        task1 = await client.create_task(title="Task 1", tags=[tags[0].name, tags[1].name])
         await client.create_task(title="Task 2", tags=[tags[2].name, tags[3].name, tags[4].name])
-        await client.create_task(title="Task 3", tags=[tags[0].name, tags[5].name, tags[9].name])
+        task3 = await client.create_task(title="Task 3", tags=[tags[0].name, tags[5].name, tags[9].name])
 
-        # Verify
+        # Verify via client API
         all_tags = await client.get_all_tags()
-        assert len(all_tags) == 10
+        all_tag_names = [t.name for t in all_tags]
+        for tag in tags:
+            assert tag.name in all_tag_names
 
         tag_a_tasks = await client.get_tasks_by_tag(tags[0].name)
-        assert len(tag_a_tasks) == 2
+        tag_a_task_ids = [t.id for t in tag_a_tasks]
+        assert task1.id in tag_a_task_ids
+        assert task3.id in tag_a_task_ids

@@ -46,8 +46,6 @@ class TestProjectCreation:
 
         assert project is not None
         assert project.name == "Simple Project"
-        assert project.id in mock_api.projects
-        mock_api.assert_called("create_project")
 
     async def test_create_project_with_color(self, client: TickTickClient):
         """Test creating a project with color."""
@@ -121,7 +119,6 @@ class TestProjectCreation:
             projects.append(project)
 
         assert len(projects) == 5
-        assert len(mock_api.projects) == 5
 
         # All IDs should be unique
         ids = [p.id for p in projects]
@@ -264,10 +261,15 @@ class TestProjectDeletion:
 
         await client.delete_project(project.id)
 
-        # Folder should still exist
-        assert folder.id in mock_api.folders
-        # Project should be gone
-        assert project.id not in mock_api.projects
+        # Folder should still exist - verify via client API
+        folders = await client.get_all_folders()
+        folder_ids = [f.id for f in folders]
+        assert folder.id in folder_ids
+
+        # Project should be gone - verify via client API
+        projects = await client.get_all_projects()
+        project_ids = [p.id for p in projects]
+        assert project.id not in project_ids
 
 
 # =============================================================================
@@ -338,8 +340,12 @@ class TestProjectFolderOrganization:
 
         assert project.group_id is None
 
-    async def test_delete_folder_ungroups_projects(self, client: TickTickClient, mock_api: MockUnifiedAPI):
-        """Test that deleting a folder ungroups its projects."""
+    async def test_delete_folder_projects_remain(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+        """Test that deleting a folder doesn't delete its projects.
+
+        Note: TickTick does NOT automatically ungroup projects when their folder
+        is deleted. Projects retain their group_id as a "dangling reference".
+        """
         folder = await client.create_folder("Folder")
         project = await client.create_project(name="Project", folder_id=folder.id)
 
@@ -347,9 +353,10 @@ class TestProjectFolderOrganization:
 
         await client.delete_folder(folder.id)
 
-        # Project should be ungrouped
-        updated_project = mock_api.projects[project.id]
-        assert updated_project.group_id is None
+        # Project should still exist and be accessible
+        retrieved_project = await client.get_project(project.id)
+        assert retrieved_project is not None
+        assert retrieved_project.name == "Project"
 
 
 # =============================================================================
