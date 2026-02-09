@@ -984,12 +984,24 @@ pytest --cov=ticktick_sdk --cov-report=term-missing
 - Try logging into ticktick.com to verify credentials
 
 ### "V2 initialization failed"
-- Your password may contain special characters - try changing it
+- Confirm you can log into https://ticktick.com with the same email/password
 - Check for 2FA/MFA (not currently supported)
+
+### V2 sign-in returns HTTP 429 (or misleading auth errors)
+TickTick’s V2 web API sign-in (`POST /api/v2/user/signon`) is protected by ELB / anti-bot rules.
+If requests don’t look like real browser traffic, you may see:
+- **HTTP 429 with an empty body**, or
+- **`username_password_not_match`** even when the password is correct.
+
+Fixes:
+- Ensure you send browser-like headers (at minimum: **`Origin: https://ticktick.com`**, **`Referer: https://ticktick.com/`**, plus a realistic **User-Agent**).
+- Ensure `X-Device` / `x-device` matches the **full web-app format** (not just `{platform, version, id}`).
+- **Device ID matters**: keep a *stable* 24-hex `x-device.id`. In practice, using a device id captured from a successful browser login can immediately unblock sign-in.
 
 ### "Rate limit exceeded"
 - Wait 30-60 seconds before retrying
 - Reduce the frequency of API calls
+- Avoid loops that repeatedly attempt `/user/signon` (they can trigger anti-bot)
 
 ---
 
