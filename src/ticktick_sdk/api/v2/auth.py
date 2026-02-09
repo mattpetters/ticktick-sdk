@@ -124,9 +124,13 @@ class SessionHandler:
         cookies = session.cookies
     """
 
-    # Minimal headers that work (based on pyticktick)
-    # Keep it simple - don't over-engineer with browser-exact headers
-    DEFAULT_USER_AGENT = "Mozilla/5.0 (rv:145.0) Firefox/145.0"
+    # TickTick's AWS ELB rate-limits / blocks auth requests that don't look like
+    # real browser traffic. A realistic Chrome UA is required for reliable V2 auth.
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
 
     def __init__(
         self,
@@ -176,9 +180,11 @@ class SessionHandler:
         """
         import json
 
+        # Web app version must track TickTick's current frontend.
+        # 6430 is now flagged and triggers 429s on /user/signon.
         return json.dumps({
             "platform": "web",
-            "version": 6430,
+            "version": 8010,
             "id": self.device_id,
         })
 
@@ -192,6 +198,12 @@ class SessionHandler:
         return {
             "User-Agent": self.DEFAULT_USER_AGENT,
             "X-Device": self._get_x_device_header(),
+            # Required for TickTick ELB bot detection bypass
+            "Origin": "https://ticktick.com",
+            "Referer": "https://ticktick.com/",
+            # Harmless but helps resemble a real browser request
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
         }
 
     async def authenticate(
