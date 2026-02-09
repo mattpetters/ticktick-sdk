@@ -267,6 +267,64 @@ class TickTickClient:
         today_tasks.sort(key=sort_key)
         return today_tasks
 
+
+    async def get_upcoming_tasks(
+        self,
+        days: int = 7,
+        tz: str = "UTC",
+    ) -> list[Task]:
+        """
+        Get tasks within the next N days (mirrors TickTick's "Next 7 Days" view).
+
+        Includes tasks where start_date or due_date falls between now
+        and end-of-day N days from now. Excludes completed tasks.
+
+        Args:
+            days: Number of days to look ahead (default 7).
+            tz: IANA timezone string (e.g., "America/Los_Angeles").
+
+        Returns:
+            List of upcoming tasks, sorted by earliest relevant date.
+        """
+        user_tz = ZoneInfo(tz)
+        now = datetime.now(user_tz)
+        window_end = (now + timedelta(days=days)).replace(
+            hour=23, minute=59, second=59, microsecond=999999
+        )
+
+        all_tasks = await self.get_all_tasks()
+        upcoming: list[tuple[datetime, Task]] = []
+
+        for task in all_tasks:
+            if task.status and task.status >= 2:
+                continue
+
+            earliest: datetime | None = None
+            for date_val in (task.due_date, getattr(task, "start_date", None)):
+                if not date_val:
+                    continue
+                try:
+                    if isinstance(date_val, str):
+                        cleaned = date_val.replace("+0000", "+00:00").replace(
+                            "Z", "+00:00"
+                        )
+                        dt = datetime.fromisoformat(cleaned)
+                    else:
+                        dt = date_val
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt_local = dt.astimezone(user_tz)
+                    if dt_local <= window_end:
+                        if earliest is None or dt_local < earliest:
+                            earliest = dt_local
+                except (ValueError, TypeError):
+                    continue
+
+            if earliest is not None:
+                upcoming.append((earliest, task))
+
+        upcoming.sort(key=lambda x: x[0])
+        return [task for _, task in upcoming]
     async def get_task(self, task_id: str, project_id: str | None = None) -> Task:
         """
         Get a task by ID.
