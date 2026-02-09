@@ -135,7 +135,7 @@ class SessionHandler:
 
     # Web app version for X-Device header. The specific version number doesn't
     # appear to be strictly validated, but the full X-Device format is required.
-    WEB_APP_VERSION = 6430
+    WEB_APP_VERSION = 8010
 
     def __init__(
         self,
